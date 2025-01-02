@@ -10,7 +10,7 @@ from telebot.states.sync.context import StateContext
 from telebot import custom_filters
 
 
-TOKEN = '7729564646:AAHy-_9E2djmtOdldwTiCxOdd6_9PDeEKX0'
+TOKEN = ''
 
 state_storage = StateMemoryStorage()
 
