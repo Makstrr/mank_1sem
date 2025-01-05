@@ -9,7 +9,7 @@ from telebot.states.sync.middleware import StateMiddleware
 from telebot.states.sync.context import StateContext
 from telebot import custom_filters
 
-TOKEN = ''
+TOKEN = 'YOUR_ACTUAL_TELEGRAM_BOT_TOKEN'
 
 # Хранилище состояний
 state_storage = StateMemoryStorage()
