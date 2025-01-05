@@ -9,111 +9,92 @@ from telebot.states.sync.middleware import StateMiddleware
 from telebot.states.sync.context import StateContext
 from telebot import custom_filters
 
-
 TOKEN = ''
 
+# Хранилище состояний
 state_storage = StateMemoryStorage()
 
+# Загрузка модели
 model = tf.keras.models.load_model('beta_binary_classifier.h5')
 
+# Инициализация бота
 bot = telebot.TeleBot(TOKEN, state_storage=state_storage, use_class_middlewares=True)
 
-
+# Состояния для загрузки и обработки изображения
 class UploadStates(StatesGroup):
     waiting_for_file = State()
     processing_file = State()
 
+# Предобработка изображения
+def preprocess_image(file_bytes):
+    try:
+        image = Image.open(BytesIO(file_bytes))
+        image = image.convert('L').resize((512, 512), resample=Image.Resampling.LANCZOS)
+        image_array = np.expand_dims(np.expand_dims(np.array(image), axis=-1), axis=0)
+        return image_array
+    except Exception as e:
+        return None
 
-class PhotoStates(StatesGroup):
-    waiting_for_photo = State()
-    resizing_photo = State()
-
-
+# Команда: /start
 @bot.message_handler(commands=['start'])
 def start_handler(msg):
-    bot.send_message(msg.chat.id, 'Привет! Я бот для анализа рентгеновских снимков.'
-                                  'Вы можете загрузить свое изображение, и я помогу вам с его анализом.'
-                                  ' Напишите /help, чтобы узнать больше о командах.')
+    bot.send_message(msg.chat.id, (
+        'Привет! Я бот для анализа рентгеновских снимков.\n'
+        'Вы можете загрузить изображение для анализа.\n'
+        'Напишите /help, чтобы узнать больше о командах.'
+    ))
 
-
+# Команда: /upload
 @bot.message_handler(commands=['upload'])
 def upload(msg, state: StateContext):
     state.set(UploadStates.waiting_for_file)
     bot.send_message(msg.chat.id, 'Пожалуйста, загрузите рентгеновский снимок в формате JPG или PNG.')
 
-
-@bot.message_handler(state=UploadStates.waiting_for_file, content_types=['photo', 'text', 'document'])
+# Хэндлер загруженного фото
+@bot.message_handler(state=UploadStates.waiting_for_file, content_types=['photo', 'document'])
 def photo_handler(msg, state: StateContext):
-    if msg.text:
-        bot.send_message(msg.chat.id, "Пожалуйста, отправьте изображение, а не текст.")
-        return
-
+    file_id = None
+    if msg.photo:
+        file_id = msg.photo[-1].file_id
     elif msg.document:
-        file_extension = msg.document.file_name.split(".")[-1].lower()
-        if file_extension not in ['jpg', 'jpeg', 'png']:
+        if msg.document.file_name.split(".")[-1].lower() not in ['jpg', 'jpeg', 'png']:
             bot.send_message(msg.chat.id, "Пожалуйста, отправьте изображение в формате JPG или PNG.")
             return
         file_id = msg.document.file_id
 
-    elif msg.photo:
-        file_id = msg.photo[-1].file_id
-    
-    bot.send_message(msg.chat.id, "Спасибо! Я получил ваш рентгеновский снимок."
-                                    "Начинаю анализ... Пожалуйста, подождите.")
+    if not file_id:
+        bot.send_message(msg.chat.id, "Пожалуйста, отправьте изображение, а не текст.")
+        return
+
+    bot.send_message(msg.chat.id, "Спасибо! Начинаю анализ... Пожалуйста, подождите.")
     bot.send_chat_action(msg.chat.id, 'typing')
     state.set(UploadStates.processing_file)
 
-    
-    file_info = bot.get_file(file_id)
-    downloaded_file = bot.download_file(file_info.file_path)
-    image = Image.open(BytesIO(downloaded_file))
     try:
-        image = Image.open(BytesIO(downloaded_file))
-        modified_image = image.convert('L').resize((512, 512), resample=Image.Resampling.LANCZOS)
+        file_info = bot.get_file(file_id)
+        file_bytes = bot.download_file(file_info.file_path)
+        processed_image = preprocess_image(file_bytes)
+        if processed_image is None:
+            raise ValueError("Ошибка при обработке изображения")
+
+        prediction = model.predict(processed_image)
+        result = ('перелом присутствует.' if prediction[0][0] >= 0.7 else 'перелом отсутствует.')
+        bot.send_message(msg.chat.id, f'Анализ завершен! На снимке {result}')
     except Exception as e:
-        bot.send_message(msg.chat.id, "Произошла ошибка при обработке изображения. Попробуйте загрузить его снова.")
-        state.delete()
-        return
-
-    modified_image = image.convert('L').resize((512, 512), resample=Image.Resampling.LANCZOS)
-
-    image_array = np.array(modified_image)
-    image_array1 = np.expand_dims(image_array, axis=-1)
-    image_array2 = np.expand_dims(image_array1, axis=0)
-
-    try:
-        prediction = model.predict(image_array2)
-    except Exception as e:
-        bot.send_message(msg.chat.id, "Произошла ошибка при анализе изображения. Попробуйте снова.")
-        return
+        bot.send_message(msg.chat.id, "Произошла ошибка. Попробуйте снова.")
     finally:
         state.delete()
-        
 
-
-    if prediction[0][0] >= 0.7:
-        bot.send_message(msg.chat.id,
-                            'Анализ завершен!'
-                            'На представленном рентгеновском снимке присутствует перелом.')
-    else:
-        bot.send_message(msg.chat.id,
-                            'Анализ завершен! На представленном рентгеновском снимке отсутствует перелом.')
-
-    state.delete()
-    return
-
-
+# Команда: /status
 @bot.message_handler(commands=['status'])
 def check_status(msg, state: StateContext):
     current_state = state.get()
-    if current_state == 'UploadStates:processing_file':
-        bot.send_message(msg.chat.id, 'Анализ вашего снимка еще не завершен. '
-                                      'Ожидайте, пожалуйста.' 
-                                      'Обычно это занимает от 1 до 5 минут.')
+    if current_state == UploadStates.processing_file:
+        bot.send_message(msg.chat.id, 'Анализ еще не завершен. Ожидайте, пожалуйста.')
     else:
         bot.send_message(msg.chat.id, 'Вы не вызвали /upload.')
 
-
+# Команда: /help
 @bot.message_handler(commands=['help'])
 def show_help(msg):
     help_text = (
@@ -124,17 +105,13 @@ def show_help(msg):
     )
     bot.send_message(msg.chat.id, help_text, parse_mode='Markdown')
 
-
+# Команда: /feedback
 @bot.message_handler(commands=['feedback'])
-def send_feedback_form(message):
+def send_feedback_form(msg):
     markup = telebot.types.InlineKeyboardMarkup()
-    markup.add(telebot.types.InlineKeyboardButton("⭐️", callback_data="rating_1"),
-               telebot.types.InlineKeyboardButton("⭐️⭐️", callback_data="rating_2"),
-               telebot.types.InlineKeyboardButton("⭐️⭐️⭐️", callback_data="rating_3"),
-               telebot.types.InlineKeyboardButton("⭐️⭐️⭐️⭐️", callback_data="rating_4"),
-               telebot.types.InlineKeyboardButton("⭐️⭐️⭐️⭐️⭐️", callback_data="rating_5"))
-    bot.reply_to(message, "Оцените наше приложение:", reply_markup=markup)
-
+    for i in range(1, 6):
+        markup.add(telebot.types.InlineKeyboardButton(f"⭐️" * i, callback_data=f"rating_{i}"))
+    bot.send_message(msg.chat.id, "Оцените наше приложение:", reply_markup=markup)
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("rating_"))
 def process_rating(call):
@@ -144,9 +121,9 @@ def process_rating(call):
     bot.edit_message_text(chat_id=call.message.chat.id, message_id=call.message.id,
                           text=f"Спасибо за вашу оценку! Вы поставили {rating} звезд.")
 
-
+# Добавление фильтра состояний и middleware (промежуточного слоя)
 bot.add_custom_filter(custom_filters.StateFilter(bot))
-
 bot.setup_middleware(StateMiddleware(bot))
 
+# Поллинг
 bot.polling(none_stop=True, long_polling_timeout=60, timeout=20, interval=1)
